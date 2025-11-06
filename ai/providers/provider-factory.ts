@@ -8,17 +8,17 @@ export type AIProvider = 'openai' | 'gemini';
 
 /**
  * Get the configured AI provider from environment variables
- * Defaults to 'gemini' if not specified
+ * Defaults to 'openai' if not specified
  */
 function getConfiguredProvider(): AIProvider {
   const provider = process.env.AI_PROVIDER?.toLowerCase() as AIProvider;
 
   if (provider && !['openai', 'gemini'].includes(provider)) {
-    console.warn(`Invalid AI_PROVIDER value: "${provider}". Defaulting to "gemini".`);
-    return 'gemini';
+    console.warn(`Invalid AI_PROVIDER value: "${provider}". Defaulting to "openai".`);
+    return 'openai';
   }
 
-  return provider || 'gemini';
+  return provider || 'openai';
 }
 
 /**

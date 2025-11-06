@@ -103,9 +103,11 @@ export function UploadVideoDialog({
     const file = e.target.files?.[0];
     if (file) {
       setSelectedFile(file);
-      setUploadState("idle");
       setUploadResult(null);
       setErrorMessage("");
+
+      // Automatically start processing
+      handleUpload(file);
     }
   };
 
@@ -126,7 +128,7 @@ export function UploadVideoDialog({
     e.stopPropagation();
   };
 
-  const handleDrop = (e: React.DragEvent) => {
+  const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setIsDragging(false);
@@ -136,17 +138,20 @@ export function UploadVideoDialog({
       const file = files[0];
       if (file.type.startsWith("video/")) {
         setSelectedFile(file);
-        setUploadState("idle");
         setUploadResult(null);
         setErrorMessage("");
+
+        // Automatically start processing
+        handleUpload(file);
       } else {
         setErrorMessage("Please select a video file");
       }
     }
   };
 
-  const handleUpload = async () => {
-    if (!selectedFile) return;
+  const handleUpload = async (file?: File) => {
+    const fileToUpload = file || selectedFile;
+    if (!fileToUpload) return;
 
     // Reset workflow stages
     setWorkflowStages([
@@ -162,7 +167,7 @@ export function UploadVideoDialog({
       setProgress(5);
 
       const formData = new FormData();
-      formData.append("video", selectedFile);
+      formData.append("video", fileToUpload);
 
       console.log("[UPLOAD] Sending request to /api/upload-video");
       const response = await fetch("/api/upload-video", {

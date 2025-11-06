@@ -1,4 +1,3 @@
-import { google } from "@ai-sdk/google";
 import { streamObject } from "ai";
 import {
   contentAnalysisSchema,
@@ -6,9 +5,10 @@ import {
   type ContentRating,
 } from "./types";
 import { matureContentRatingPrompt } from "../prompts/mature-content-rating";
+import { getVisionModel } from "../providers/provider-factory";
 
 /**
- * Analyzes an image for mature content using Google's Gemini Flash Lite model
+ * Analyzes an image for mature content using the configured AI provider
  * @param imageInput - Image URL or Buffer
  * @param description - Optional description for additional context
  * @returns Stream of content analysis results
@@ -17,14 +17,8 @@ export async function moderateContent(
   imageInput: string | Buffer | URL,
   description?: string
 ) {
-  // Validate API key
-  if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
-    throw new Error(
-      "GOOGLE_GENERATIVE_AI_API_KEY environment variable is required"
-    );
-  }
 
-  // Prepare image for Gemini
+  // Prepare image for AI model
   let imageUrl: string | URL;
 
   if (Buffer.isBuffer(imageInput)) {
@@ -48,7 +42,7 @@ export async function moderateContent(
   }
 
   const result = streamObject({
-    model: google("gemini-2.5-flash-lite"),
+    model: getVisionModel(),
     schema: contentAnalysisSchema,
     messages: [
       {
@@ -66,7 +60,7 @@ export async function moderateContent(
 
 /**
  * Calculates the final content rating based on the analysis
- * @param analysis - The content analysis from Gemini
+ * @param analysis - The content analysis from the AI model
  * @returns Content rating with summary
  */
 export function calculateRating(analysis: ContentAnalysis): ContentRating {
@@ -128,12 +122,12 @@ export async function moderateContentSync(
   const stream = await moderateContent(imageInput, description);
 
   // Wait for the final complete object with timeout
-  const timeoutMs = 30000; // 30 second timeout
+  const timeoutMs = 120000; // 2 minute timeout
   const objectPromise = stream.object;
 
   const timeoutPromise = new Promise<never>((_, reject) => {
     setTimeout(
-      () => reject(new Error("Gemini API timeout after 30 seconds")),
+      () => reject(new Error("AI API timeout after 2 minutes")),
       timeoutMs
     );
   });

@@ -1,415 +1,127 @@
-# Video Processing Workflow: A Deep Dive into Vercel Workflow Streaming
-
-A real-time video content moderation system built with Next.js, Vercel Workflow, Vercel Blob, and FFmpeg.
-
-## Overview
-
-This project demonstrates how to build a production-ready video processing pipeline using Vercel Workflow's durable execution and real-time streaming capabilities. Users can upload videos, which are automatically analyzed frame-by-frame for inappropriate content, with live progress updates streamed to the frontend.
-
-**Key Technologies:**
-- **Vercel Workflow** - Durable execution with built-in retry and state management
-- **Vercel Blob** - Temporary video and screenshot storage
-- **FFmpeg** - Frame extraction from videos
-- **AI SDK 5** - Streaming utilities and transport layer
-- **Next.js 16** - App Router with Server Actions
-- **shadcn/ui** - UI components
-
-## Architecture
-
-```
-┌─────────────┐
-│   Upload    │
-│   Dialog    │
-└──────┬──────┘
-       │ FormData
-       ▼
-┌─────────────────────────────────┐
-│  API Route                      │
-│  /api/upload-video              │
-│  - Starts workflow              │
-│  - Returns readable stream      │
-└────────┬────────────────────────┘
-         │ ReadableStream
-         ▼
-┌─────────────────────────────────┐
-│  Frontend                       │
-│  - Reads stream chunks          │
-│  - Parses JSON updates          │
-│  - Updates progress UI          │
-└─────────────────────────────────┘
-
-         Workflow Execution
-         ==================
-┌─────────────────────────────────┐
-│  Workflow Function              │
-│  - Gets WritableStream          │
-│  - Calls steps                  │
-│  - Passes stream to steps       │
-└────────┬────────────────────────┘
-         │
-         ├─► writeProgress (step)
-         ├─► uploadVideoToBlob (step)
-         ├─► writeProgress (step)
-         ├─► extractFrames (step)
-         ├─► writeProgress (step)
-         ├─► processOneFrame (step) ×N
-         ├─► writeProgress (step) ×N
-         ├─► deleteVideoBlob (step)
-         └─► writeProgress (step)
-```
-
-## The Journey: Key Learnings
-
-### 1. Understanding Workflow Streaming Constraints
-
-**The Problem We Hit:**
-Initially, we tried to call `.getWriter()` directly in the workflow function:
-
-```typescript
-// ❌ THIS DOESN'T WORK
-export async function processVideo() {
-  "use workflow";
-
-  const writable = getWritable();
-  const writer = writable.getWriter(); // ERROR: Not supported in workflow functions
-  await writer.write(...);
-}
-```
-
-**Error:**
-```
-Error: Not supported in workflow functions
-    at WritableStream.getWriter
-```
-
-**Why?** Workflow functions must be deterministic and replay-safe. Direct stream manipulation would break this guarantee.
-
-**The Solution:**
-Pass the `WritableStream` to step functions, which CAN call `.getWriter()`:
-
-```typescript
-// ✅ THIS WORKS
-export async function processVideo() {
-  "use workflow";
-
-  const writable = getWritable();
-  await writeProgress(writable, { step: "started" }); // Pass to step
-}
-
-async function writeProgress(writable: WritableStream, data: any) {
-  "use step";
-
-  const writer = writable.getWriter(); // OK in step functions!
-  try {
-    await writer.write(new TextEncoder().encode(JSON.stringify(data)));
-  } finally {
-    writer.releaseLock();
-  }
-}
-```
+# Building Real-Time Video Moderation with Vercel Workflow
 
-### 2. Single Step vs. Multiple Steps for Real-Time Updates
+A production-ready video content moderation system that demonstrates the power (and quirks) of durable execution with real-time streaming.
 
-**First Attempt: Single Big Step**
+## What This Is
 
-We initially tried to put all logic in one step:
+This project processes videos frame-by-frame to detect inappropriate content, streaming live progress updates to the frontend. It's built to be both a functional application and an educational resource—every mistake, discovery, and solution is documented.
 
-```typescript
-async function processVideoWithStreaming(writable, buffer, filename) {
-  "use step";
+**Tech Stack:** Next.js 16, Vercel Workflow 4.0, Vercel Blob, FFmpeg, AI SDK 5, Gemini/OpenAI for content analysis.
 
-  const writer = writable.getWriter();
+## The Most Significant Learnings
 
-  await writer.write("uploading...");
-  await uploadVideo();
-  await writer.write("extracting...");
-  await extractFrames();
-  await writer.write("processing...");
-  await processFrames();
+### 1. Vercel Workflow's Streaming Constraints Are Non-Obvious
 
-  writer.releaseLock();
-}
-```
+The biggest discovery: **workflow functions cannot call `.getWriter()` on streams**. Only step functions can. This isn't obvious from documentation, but it makes sense—workflows must be deterministic and replay-safe, and direct stream manipulation would break that guarantee.
 
-**The Problem:**
-- Step ran for 2-3 seconds
-- ALL writes were buffered until step completed
-- Frontend received everything at once at the end
-- No real-time progress!
+The solution is architectural: workflow functions receive the `WritableStream` and pass it to step functions, which then write to it. This pattern took hours to discover but is now the foundation of the entire system.
 
-**The Solution: Multiple Small Steps**
+### 2. Real-Time Streaming Requires Granular Steps
 
-Break work into separate steps, write progress between them:
+Early attempts buffered all progress updates within a single step function. The result? Everything arrived at once when the step completed, defeating the purpose of streaming.
 
-```typescript
-export async function processVideo(buffer, filename) {
-  "use workflow";
+The fix: **every progress update must be its own step**. After each step completes, the workflow suspends and the update reaches the client immediately. This means orchestrating dozens of tiny steps instead of a few large ones—counterintuitive, but necessary for real-time UX.
 
-  const writable = getWritable();
+Critical constraint discovered: **steps cannot call other steps**. Nested steps cause silent hangs because workflows can only await step functions, not other workflow-level operations.
 
-  await writeProgress(writable, { step: "started" });     // Step 1: Write
-  const url = await uploadVideo(buffer, filename);         // Step 2: Upload
-  await writeProgress(writable, { step: "uploaded" });    // Step 3: Write
-  const frames = await extractFrames(url);                 // Step 4: Extract
-  await writeProgress(writable, { step: "extracted" });   // Step 5: Write
+### 3. Multi-Provider AI Architecture for Resilience
 
-  for (let i = 0; i < frames.length; i++) {
-    await processFrame(frames[i]);                         // Step N: Process
-    await writeProgress(writable, { frame: i });           // Step N+1: Write
-  }
-}
-```
+The content moderation system supports both Gemini 2.5 Flash Lite and OpenAI GPT-5 through a clean factory pattern. Switch providers via environment variable. This abstraction proved essential when hitting rate limits or availability issues.
 
-**Result:** Each `await writeProgress()` call is a separate step. After each step completes, the workflow suspends and the write reaches the client immediately!
+Content analysis uses structured output with Zod schemas via AI SDK's `streamObject`, eliminating prompt engineering guesswork. The system analyzes for 12+ content categories with confidence scoring (1-5 scale) and assigns ratings: Safe, 16+, or 18+.
 
-### 3. API Route Streaming: `.readable` vs `.getReadable()`
+### 4. Parallel Processing with Backpressure Control
 
-**Another Gotcha:**
+Frame processing runs 10 concurrent AI requests using `p-limit`. This balances throughput with rate limit constraints—pure sequential processing was too slow; unlimited parallelism triggered rate errors.
 
-```typescript
-// ❌ DOESN'T STREAM PROPERLY
-const stream = workflowRun.getReadable();
+Each frame extraction, AI analysis, and result storage happens in parallel, with progress updates streaming back individually. The user sees frames being analyzed in real-time.
 
-// ✅ CORRECT - USE PROPERTY, NOT METHOD
-const stream = workflowRun.readable;
-```
+### 5. Blob Storage Retry Safety Is Critical
 
-Following the AI SDK example pattern:
+Workflows retry failed steps automatically. Early versions crashed on retry because blob uploads failed with "already exists" errors.
 
-```typescript
-export async function POST(request: Request) {
-  const workflowRun = await start(processVideoUpload, [buffer, filename]);
+The fix: `addRandomSuffix: true` on all blob uploads. Simple, but easy to miss.
 
-  const stream = workflowRun.readable; // Property, not method!
+Another trap: the `.readable` property streams correctly, but `.getReadable()` method does not. This subtle API difference cost debugging time.
 
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    },
-  });
-}
-```
+### 6. FFmpeg Integration Requires File Verification
 
-### 4. Blob Storage and Retry Safety
+Downloaded video files occasionally failed with "moov atom not found" errors—FFmpeg tried reading before the file was fully written to disk.
 
-**Challenge:** When workflow steps retry, blob uploads would fail with:
+Solution: verify file size after download matches buffer length before spawning FFmpeg. This defensive check prevented mysterious failures.
 
-```
-Error: This blob already exists, use `allowOverwrite: true`
-```
+### 7. Frontend Stream Consumption Needs Careful Parsing
 
-**Solution:** Use `addRandomSuffix: true`:
+Server-Sent Events arrive as newline-delimited JSON chunks. The challenge: chunks can split mid-line. The solution requires buffering incomplete lines and parsing only complete ones, using a state machine pattern to track partial data.
 
-```typescript
-async function uploadVideoToBlob(buffer: Buffer, filename: string) {
-  "use step";
+Updates are typed by `type` field: `progress`, `frameProcessed`, `complete`, `error`. The frontend displays different UI for each, creating a rich real-time experience.
 
-  const blob = await put(filename, buffer, {
-    access: "public",
-    contentType: "video/mp4",
-    addRandomSuffix: true, // ✅ Prevents conflicts on retry
-  });
+### 8. Error Handling Must Stream to Frontend
 
-  return blob.url;
-}
-```
+When workflows fail, the error must be written to the stream so the frontend can show meaningful messages. Otherwise, the upload dialog sits in loading state indefinitely.
 
-### 5. FFmpeg Integration - The "moov atom not found" Error
+Cleanup is critical: delete uploaded video blobs on error to avoid storage costs. Delete original videos after processing completes, keep only flagged screenshots.
 
-**Problem:** FFmpeg couldn't read the downloaded video:
+### 9. LocalStorage as Database Is Surprisingly Effective
 
-```
-[mov,mp4,m4a,3gp,3g2,mj2 @ 0x70f038000] moov atom not found
-Error opening input file
-```
+No traditional database—everything lives in browser localStorage. For a demo, this provides instant persistence without infrastructure complexity. Data models are simple: `FlaggedVideo` and `FlaggedFrame` with all metadata.
 
-**Root Cause:** File wasn't fully written/synced before FFmpeg tried to read it.
+The grid refreshes on mount to show newly processed videos. Status can be updated to "approved" or "removed" via the detail modal.
 
-**Solution:** Verify file after download:
+### 10. Production-Ready Error Handling Throughout
 
-```typescript
-async function extractFrames(videoUrl: string, filename: string) {
-  "use step";
+Timeouts on AI requests (2 minutes), graceful fallbacks, blob cleanup on failures, file verification, retry-safe uploads. Every failure mode discovered during development is now handled.
 
-  // Download video
-  const response = await fetch(videoUrl);
-  const videoBuffer = Buffer.from(await response.arrayBuffer());
-  await writeFile(videoPath, videoBuffer);
+The workflow documents common errors and solutions in dedicated CLAUDE.md files—both at project root and in the workflows directory. These serve as living documentation of lessons learned.
 
-  // Verify file was written correctly
-  const stats = await stat(videoPath);
-  if (stats.size !== videoBuffer.length) {
-    throw new Error(`File size mismatch: ${stats.size} vs ${videoBuffer.length}`);
-  }
+## Architecture Highlights
 
-  // Now FFmpeg can read it
-  await execAsync(`ffmpeg -i "${videoPath}" -vf fps=1/5 "${outputPattern}"`);
-}
-```
+Videos upload via drag-and-drop to a Next.js API route that starts the Vercel Workflow and returns a `ReadableStream`. The frontend consumes this stream, parsing progress updates and rendering them in a custom Queue component that visualizes workflow stages.
 
-### 6. Frontend Stream Consumption
+The workflow orchestrates: upload to Blob → download to temp file → FFmpeg frame extraction (1 frame per 5 seconds) → parallel AI analysis → structured results → cleanup → stream completion.
 
-**Pattern:**
+Every step is separate. Every progress update is its own step. This granularity enables true real-time streaming.
 
-```typescript
-const response = await fetch("/api/upload-video", {
-  method: "POST",
-  body: formData,
-});
+## Why This Matters
 
-const reader = response.body?.getReader();
-const decoder = new TextDecoder();
-let buffer = "";
-
-while (true) {
-  const { done, value } = await reader.read();
-  if (done) break;
-
-  buffer += decoder.decode(value, { stream: true });
-
-  // Process complete lines
-  const lines = buffer.split("\n");
-  buffer = lines.pop() || ""; // Keep incomplete line
-
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    const update = JSON.parse(line);
-
-    // Update UI based on update.type
-    if (update.type === "progress") {
-      setProgress(update.percent);
-    } else if (update.type === "complete") {
-      setResult(update.result);
-    }
-  }
-}
-```
+This project documents what you learn the hard way: the gap between documentation and production. Vercel Workflow is powerful, but its constraints around streaming, determinism, and step granularity aren't intuitive.
 
-### 7. Error Handling in Workflows
+The codebase reads like a blog post crossed with production code—it teaches while it demonstrates. Every commented constraint, every documented gotcha, exists because we hit it.
 
-**Best Practice:**
+If you're building durable execution workflows with real-time streaming, this project shows the patterns that work and the pitfalls to avoid.
 
-```typescript
-export async function processVideo(buffer, filename) {
-  "use workflow";
+## Key Components
 
-  const writable = getWritable();
-  let videoUrl: string | null = null;
+**Upload Dialog:** Sophisticated drag-and-drop UI with custom Queue visualization showing workflow stages (uploading, extracting, analyzing). Progress bar updates in real-time as frames are processed.
 
-  try {
-    videoUrl = await uploadStep(buffer, filename);
-    const frames = await extractStep(videoUrl);
-    const incidents = await processStep(frames);
+**Video Grid:** Card-based gallery displaying all processed videos with severity badges (high/medium/low), rating badges (16+/18+), and flag counts.
 
-    await writeProgress(writable, {
-      type: "complete",
-      result: { incidents }
-    });
+**Detail Modal:** Full inspection view showing all flagged frames with screenshots, AI confidence scores, detailed reasoning per category, and action buttons.
 
-    return { incidents };
-  } catch (error) {
-    // Send error to client
-    await writeProgress(writable, {
-      type: "error",
-      message: error.message,
-    });
+**Content Moderation Engine:** Parallel processing with structured AI output. Categories include: cursing, violence, sexual content, nudity, drug use, gore, disturbing themes. Each has confidence scores and natural language explanations.
 
-    // Cleanup resources
-    if (videoUrl) {
-      await deleteBlob(videoUrl);
-    }
+## What Changed During Development
 
-    throw error; // Re-throw to mark workflow as failed
-  }
-}
-```
+Originally attempted single-step buffering—failed. Discovered the nested steps antipattern—fixed. Hit blob retry errors—resolved with random suffixes. Encountered FFmpeg file read failures—added verification. Found `.getReadable()` didn't stream—switched to `.readable` property.
 
-## Key Patterns & Best Practices
+The AI provider abstraction was added after experiencing Gemini rate limits. LocalStorage replaced an initial database design for simplicity. The Queue component was custom-built after shadcn/ui components didn't fit the workflow visualization needs.
 
-### ✅ DO
+## Running This Yourself
 
-1. **Pass streams to steps** - Workflow gets stream, steps write to it
-2. **One write per step** - Each progress update should be a separate step call
-3. **Use `.readable` property** - Not `.getReadable()` method in API routes
-4. **Add random suffixes to blobs** - Prevents retry conflicts
-5. **Verify file downloads** - Check file size before processing
-6. **Clean up resources** - Delete temp files and blobs, even on error
-7. **Send errors to stream** - Let frontend know what went wrong
+Install FFmpeg, configure Vercel Blob storage, set environment variables for AI providers (Gemini or OpenAI), run `pnpm dev`. Full instructions in original README.
 
-### ❌ DON'T
+Deploy to Vercel for automatic Workflow runtime support—no additional configuration needed.
 
-1. **Don't call `.getWriter()` in workflows** - Only in step functions
-2. **Don't write multiple times in one step** - Won't stream in real-time
-3. **Don't forget error handling** - Workflows can retry, clean up resources
-4. **Don't ignore file validation** - Verify downloads completed successfully
+## Future Directions
 
-## Project Structure
+The foundation is production-ready, but opportunities remain: webhook patterns for long-running processes, database persistence for scale, batch processing for multiple videos, user authentication, video preview in results.
 
-```
-video-processing-workflow/
-├── app/
-│   ├── api/
-│   │   └── upload-video/
-│   │       └── route.ts         # API route, returns stream
-│   ├── layout.tsx
-│   └── page.tsx                 # Main page with video grid
-├── components/
-│   ├── ui/                      # shadcn/ui components
-│   ├── topbar.tsx              # Upload button
-│   ├── upload-video-dialog.tsx # Upload UI with progress
-│   └── video-moderation-grid.tsx
-├── workflows/
-│   ├── process-video.ts        # Main workflow logic
-│   └── CLAUDE.md               # Workflow best practices
-└── CLAUDE.md                   # Project instructions
-```
-
-## Running Locally
-
-```bash
-# Install dependencies
-pnpm install
-
-# Set up environment variables
-echo "BLOB_READ_WRITE_TOKEN=your_token" > .env.local
-
-# Run development server
-pnpm dev
-```
-
-**Requirements:**
-- FFmpeg installed (`brew install ffmpeg` on macOS)
-- Vercel Blob storage configured
-- Node.js 18+
-
-## Deployment
-
-Deploy to Vercel for automatic Workflow support:
-
-```bash
-vercel deploy
-```
-
-Workflow runtime is automatically configured on Vercel - no additional setup needed!
-
-## Future Enhancements
-
-- [ ] Use AI SDK for actual content moderation (replace mock)
-- [ ] Add webhook pattern for long-running processes
-- [ ] Implement video preview in results
-- [ ] Add batch processing for multiple videos
-- [ ] Store moderation results in database
-- [ ] Add authentication and user management
+The current implementation proves the core pattern: durable execution with real-time streaming for computationally intensive tasks.
 
 ## References
 
-- [Vercel Workflow Documentation](https://vercel.com/docs/workflow)
-- [AI SDK Documentation](https://sdk.vercel.ai/docs)
-- [Vercel Blob Documentation](https://vercel.com/docs/storage/vercel-blob)
-- [FFmpeg Documentation](https://ffmpeg.org/documentation.html)
+Built using Vercel Workflow 4.0, AI SDK 5, Next.js 16 App Router. Comprehensive documentation in `/workflows/CLAUDE.md` covers every workflow pattern and antipattern discovered during development.
 
 ---
 
-Built with insights from building a real-world video processing pipeline. All the mistakes, learnings, and solutions documented for the next developer.
+This isn't just a demo. It's documentation of the journey from "this should work" to "this actually works in production." All the mistakes included.
