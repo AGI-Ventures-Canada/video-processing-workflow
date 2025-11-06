@@ -1,10 +1,18 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { AlertTriangleIcon, ClockIcon } from "lucide-react"
 import { VideoDetailModal } from "@/components/video-detail-modal"
+import { getVideos } from "@/lib/video-storage"
+
+export interface CategoryReason {
+  category: string
+  detected: boolean
+  confidence: number
+  reason: string
+}
 
 export interface FlaggedFrame {
   id: string
@@ -12,6 +20,9 @@ export interface FlaggedFrame {
   confidence: number
   screenshot: string
   reason: string
+  categories?: string // Comma-separated categories or single category
+  rating?: "safe" | "16+" | "18+" // Content rating
+  categoryReasons?: CategoryReason[] // Detailed reasons for each category
 }
 
 export interface FlaggedVideo {
@@ -23,142 +34,40 @@ export interface FlaggedVideo {
   severity: "high" | "medium" | "low"
   flagCount: number
   flaggedFrames: FlaggedFrame[]
+  status?: "flagged" | "approved" | "removed"
+  overallRating?: "safe" | "16+" | "18+" // Overall video rating based on highest frame rating
 }
 
-const mockVideos: FlaggedVideo[] = [
-  {
-    id: "1",
-    title: "User Upload - Video 001",
-    thumbnail: "/video-thumbnail.png",
-    uploadDate: "2025-01-15",
-    duration: "5:32",
-    severity: "high",
-    flagCount: 8,
-    flaggedFrames: [
-      {
-        id: "f1",
-        timestamp: "0:45",
-        confidence: 0.94,
-        screenshot: "/flagged-frame.jpg",
-        reason: "Inappropriate content detected",
-      },
-      {
-        id: "f2",
-        timestamp: "2:15",
-        confidence: 0.89,
-        screenshot: "/flagged-frame.jpg",
-        reason: "Violence detected",
-      },
-      {
-        id: "f3",
-        timestamp: "3:42",
-        confidence: 0.91,
-        screenshot: "/flagged-frame.jpg",
-        reason: "Inappropriate content detected",
-      },
-    ],
-  },
-  {
-    id: "2",
-    title: "User Upload - Video 002",
-    thumbnail: "/video-thumbnail.png",
-    uploadDate: "2025-01-14",
-    duration: "3:18",
-    severity: "medium",
-    flagCount: 3,
-    flaggedFrames: [
-      {
-        id: "f4",
-        timestamp: "1:22",
-        confidence: 0.76,
-        screenshot: "/flagged-frame.jpg",
-        reason: "Sensitive content detected",
-      },
-    ],
-  },
-  {
-    id: "3",
-    title: "User Upload - Video 003",
-    thumbnail: "/video-thumbnail.png",
-    uploadDate: "2025-01-13",
-    duration: "8:45",
-    severity: "low",
-    flagCount: 2,
-    flaggedFrames: [
-      {
-        id: "f5",
-        timestamp: "4:30",
-        confidence: 0.68,
-        screenshot: "/flagged-frame.jpg",
-        reason: "Potential policy violation",
-      },
-    ],
-  },
-  {
-    id: "4",
-    title: "User Upload - Video 004",
-    thumbnail: "/video-thumbnail.png",
-    uploadDate: "2025-01-12",
-    duration: "6:20",
-    severity: "high",
-    flagCount: 12,
-    flaggedFrames: [
-      {
-        id: "f6",
-        timestamp: "0:15",
-        confidence: 0.97,
-        screenshot: "/flagged-frame.jpg",
-        reason: "Explicit content detected",
-      },
-      {
-        id: "f7",
-        timestamp: "2:45",
-        confidence: 0.93,
-        screenshot: "/flagged-frame.jpg",
-        reason: "Violence detected",
-      },
-    ],
-  },
-  {
-    id: "5",
-    title: "User Upload - Video 005",
-    thumbnail: "/video-thumbnail.png",
-    uploadDate: "2025-01-11",
-    duration: "4:55",
-    severity: "medium",
-    flagCount: 5,
-    flaggedFrames: [
-      {
-        id: "f8",
-        timestamp: "1:30",
-        confidence: 0.82,
-        screenshot: "/flagged-frame.jpg",
-        reason: "Sensitive content detected",
-      },
-    ],
-  },
-  {
-    id: "6",
-    title: "User Upload - Video 006",
-    thumbnail: "/video-thumbnail.png",
-    uploadDate: "2025-01-10",
-    duration: "7:12",
-    severity: "low",
-    flagCount: 1,
-    flaggedFrames: [
-      {
-        id: "f9",
-        timestamp: "5:00",
-        confidence: 0.65,
-        screenshot: "/flagged-frame.jpg",
-        reason: "Potential policy violation",
-      },
-    ],
-  },
-]
+interface VideoModerationGridProps {
+  onRefreshNeeded?: (callback: () => void) => void
+}
 
-export function VideoModerationGrid() {
+export function VideoModerationGrid({ onRefreshNeeded }: VideoModerationGridProps = {}) {
   const [selectedVideo, setSelectedVideo] = useState<FlaggedVideo | null>(null)
+  const [videos, setVideos] = useState<FlaggedVideo[]>([])
+  const [loading, setLoading] = useState(true)
+
+  // Load videos from localStorage
+  useEffect(() => {
+    loadVideos()
+  }, [])
+
+  // Expose refresh function to parent
+  useEffect(() => {
+    onRefreshNeeded?.(loadVideos)
+  }, [onRefreshNeeded])
+
+  const loadVideos = () => {
+    setLoading(true)
+    try {
+      const storedVideos = getVideos()
+      setVideos(storedVideos)
+    } catch (error) {
+      console.error("Error loading videos from localStorage:", error)
+    } finally {
+      setLoading(false)
+    }
+  }
 
   const getSeverityColor = (severity: string) => {
     switch (severity) {
@@ -175,8 +84,21 @@ export function VideoModerationGrid() {
 
   return (
     <>
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {mockVideos.map((video) => (
+      {loading ? (
+        <div className="flex items-center justify-center py-12">
+          <p className="text-muted-foreground">Loading videos...</p>
+        </div>
+      ) : videos.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-12 text-center">
+          <AlertTriangleIcon className="size-12 text-muted-foreground mb-4" />
+          <p className="text-lg font-medium text-foreground mb-2">No flagged videos</p>
+          <p className="text-sm text-muted-foreground">
+            Upload videos to start content moderation
+          </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {videos.map((video) => (
           <Card
             key={video.id}
             className="group cursor-pointer overflow-hidden border-border bg-card hover:border-primary/50 transition-all duration-200"
@@ -191,11 +113,23 @@ export function VideoModerationGrid() {
               <div className="absolute bottom-2 right-2 bg-black/80 text-white text-xs px-2 py-1 rounded">
                 {video.duration}
               </div>
-              <div className="absolute top-2 left-2">
+              <div className="absolute top-2 left-2 flex gap-2">
                 <Badge variant="outline" className={getSeverityColor(video.severity)}>
                   <AlertTriangleIcon className="size-3 mr-1" />
                   {video.severity}
                 </Badge>
+                {video.overallRating && video.overallRating !== "safe" && (
+                  <Badge
+                    variant="outline"
+                    className={
+                      video.overallRating === "18+"
+                        ? "bg-red-500/10 text-red-500 border-red-500/20"
+                        : "bg-amber-500/10 text-amber-500 border-amber-500/20"
+                    }
+                  >
+                    {video.overallRating}
+                  </Badge>
+                )}
               </div>
             </div>
             <div className="p-4">
@@ -211,14 +145,16 @@ export function VideoModerationGrid() {
               </div>
             </div>
           </Card>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
 
       {selectedVideo && (
         <VideoDetailModal
           video={selectedVideo}
           open={!!selectedVideo}
           onOpenChange={(open) => !open && setSelectedVideo(null)}
+          onVideoUpdated={loadVideos}
         />
       )}
     </>

@@ -8,9 +8,20 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Queue,
+  QueueSection,
+  QueueSectionTrigger,
+  QueueSectionLabel,
+  QueueSectionContent,
+  QueueList,
+  QueueItem,
+  QueueItemIndicator,
+  QueueItemContent,
+  QueueItemDescription,
+} from "@/components/ai-elements/queue";
 import {
   UploadIcon,
   CheckCircleIcon,
@@ -18,13 +29,24 @@ import {
   Loader2Icon,
 } from "lucide-react";
 import { useState, useRef } from "react";
+import { saveVideo, workflowResultToFlaggedVideo } from "@/lib/video-storage";
 
 interface UploadVideoDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onVideoSaved?: () => void; // Callback to refresh video grid
 }
 
 type UploadState = "idle" | "uploading" | "processing" | "success" | "error";
+
+type WorkflowStageStatus = "pending" | "in_progress" | "completed";
+
+interface WorkflowStage {
+  id: string;
+  title: string;
+  status: WorkflowStageStatus;
+  description?: string;
+}
 
 interface Incident {
   timestamp: number;
@@ -37,11 +59,15 @@ interface UploadResult {
   incidents: Incident[];
   totalFrames: number;
   processedAt: string;
+  metadata: {
+    filename: string;
+  };
 }
 
 export function UploadVideoDialog({
   open,
   onOpenChange,
+  onVideoSaved,
 }: UploadVideoDialogProps) {
   const [uploadState, setUploadState] = useState<UploadState>("idle");
   const [progress, setProgress] = useState(0);
@@ -50,6 +76,28 @@ export function UploadVideoDialog({
   const [errorMessage, setErrorMessage] = useState<string>("");
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [workflowStages, setWorkflowStages] = useState<WorkflowStage[]>([
+    { id: "started", title: "Starting", status: "pending" },
+    { id: "upload", title: "Upload to Storage", status: "pending" },
+    { id: "extract", title: "Frame Extraction", status: "pending" },
+    { id: "process", title: "Frame Processing", status: "pending" },
+    { id: "cleanup", title: "Cleanup", status: "pending" },
+  ]);
+
+  // Helper function to update workflow stage status
+  const updateStageStatus = (
+    stageId: string,
+    status: WorkflowStageStatus,
+    description?: string
+  ) => {
+    setWorkflowStages((prev) =>
+      prev.map((stage) =>
+        stage.id === stageId
+          ? { ...stage, status, description }
+          : stage
+      )
+    );
+  };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -99,6 +147,15 @@ export function UploadVideoDialog({
 
   const handleUpload = async () => {
     if (!selectedFile) return;
+
+    // Reset workflow stages
+    setWorkflowStages([
+      { id: "started", title: "Starting", status: "in_progress" },
+      { id: "upload", title: "Upload to Storage", status: "pending" },
+      { id: "extract", title: "Frame Extraction", status: "pending" },
+      { id: "process", title: "Frame Processing", status: "pending" },
+      { id: "cleanup", title: "Cleanup", status: "pending" },
+    ]);
 
     try {
       setUploadState("uploading");
@@ -166,16 +223,52 @@ export function UploadVideoDialog({
 
             if (update.type === "progress") {
               setProgress(update.percent);
-              if (update.step === "uploaded") {
+
+              // Update workflow stages based on step
+              if (update.step === "started") {
+                updateStageStatus("started", "completed");
+                updateStageStatus("upload", "in_progress");
+              } else if (update.step === "uploaded") {
+                updateStageStatus("upload", "completed");
+                updateStageStatus("extract", "in_progress");
                 setUploadState("processing");
+              } else if (update.step === "extracted") {
+                const framesText = update.totalFrames ? `${update.totalFrames} frames extracted` : "";
+                updateStageStatus("extract", "completed", framesText);
+                updateStageStatus("process", "in_progress", "Starting frame processing...");
+              } else if (update.step === "cleanup") {
+                updateStageStatus("process", "completed");
+                updateStageStatus("cleanup", "in_progress");
               }
             } else if (update.type === "frameProcessed") {
               setProgress(update.percent);
               setUploadState("processing");
+
+              // Update frame processing description
+              const processText = `Processing frames (${update.current}/${update.total})`;
+              updateStageStatus("process", "in_progress", processText);
             } else if (update.type === "complete") {
               setProgress(100);
               setUploadResult(update.result);
               setUploadState("success");
+
+              // Mark all stages as completed
+              updateStageStatus("cleanup", "completed");
+
+              // Save to localStorage
+              try {
+                const flaggedVideo = workflowResultToFlaggedVideo(
+                  update.result,
+                  update.result.metadata
+                );
+                saveVideo(flaggedVideo);
+                console.log("[UPLOAD] Video saved to localStorage:", flaggedVideo.id);
+
+                // Notify parent component to refresh
+                onVideoSaved?.();
+              } catch (error) {
+                console.error("[UPLOAD] Error saving to localStorage:", error);
+              }
             } else if (update.type === "error") {
               setUploadState("error");
               setErrorMessage(update.message);
@@ -203,6 +296,13 @@ export function UploadVideoDialog({
       setSelectedFile(null);
       setUploadResult(null);
       setErrorMessage("");
+      setWorkflowStages([
+        { id: "started", title: "Starting", status: "pending" },
+        { id: "upload", title: "Upload to Storage", status: "pending" },
+        { id: "extract", title: "Frame Extraction", status: "pending" },
+        { id: "process", title: "Frame Processing", status: "pending" },
+        { id: "cleanup", title: "Cleanup", status: "pending" },
+      ]);
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
       }
@@ -217,7 +317,7 @@ export function UploadVideoDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
-      <DialogContent className="max-w-2xl w-[calc(100vw-2rem)] overflow-x-hidden">
+      <DialogContent className="max-w-2xl w-[calc(100vw-2rem)] max-h-[85vh] overflow-x-hidden">
         <DialogHeader>
           <DialogTitle>Upload Video for Moderation</DialogTitle>
           <DialogDescription>
@@ -286,22 +386,46 @@ export function UploadVideoDialog({
 
           {/* Upload/Processing Progress */}
           {(uploadState === "uploading" || uploadState === "processing") && (
-            <div className="space-y-4">
-              <div className="flex items-center gap-3">
-                <Loader2Icon className="size-5 animate-spin text-primary" />
-                <div className="flex-1">
-                  <p className="text-sm font-medium">
-                    {uploadState === "uploading"
-                      ? "Uploading video..."
-                      : "Processing video frames..."}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    This may take a few minutes
-                  </p>
-                </div>
-              </div>
-              <Progress value={progress} />
-            </div>
+            <Queue>
+              <QueueSection defaultOpen={true}>
+                <QueueSectionTrigger>
+                  <QueueSectionLabel
+                    count={workflowStages.filter(s => s.status === "completed").length}
+                    label={`of ${workflowStages.length} stages completed`}
+                  />
+                </QueueSectionTrigger>
+                <QueueSectionContent>
+                  <QueueList>
+                    {workflowStages.map((stage) => (
+                      <QueueItem key={stage.id}>
+                        <div className="flex items-start gap-3">
+                          <QueueItemIndicator
+                            completed={stage.status === "completed"}
+                          />
+                          <div className="flex-1 min-w-0">
+                            <QueueItemContent
+                              completed={stage.status === "completed"}
+                            >
+                              {stage.title}
+                            </QueueItemContent>
+                            {stage.description && (
+                              <QueueItemDescription
+                                completed={stage.status === "completed"}
+                              >
+                                {stage.description}
+                              </QueueItemDescription>
+                            )}
+                          </div>
+                          {stage.status === "in_progress" && (
+                            <Loader2Icon className="size-4 animate-spin text-primary shrink-0" />
+                          )}
+                        </div>
+                      </QueueItem>
+                    ))}
+                  </QueueList>
+                </QueueSectionContent>
+              </QueueSection>
+            </Queue>
           )}
 
           {/* Success - Show Results */}

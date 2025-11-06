@@ -5,6 +5,7 @@ import { promisify } from "util";
 import { writeFile, unlink, readFile, stat } from "fs/promises";
 import path from "path";
 import os from "os";
+import pLimit from "p-limit";
 
 const execAsync = promisify(exec);
 
@@ -47,28 +48,37 @@ export async function processVideoUpload(videoBuffer: Buffer, filename: string) 
       percent: 40,
     });
 
-    // Step 3: Process each frame for moderation (each frame is a separate step)
-    const incidents = [];
+    // Step 3: Process frames with continuous parallel moderation (max 10 concurrent)
     const totalFrames = frames.length;
+    const MAX_CONCURRENT = 10;
+    let processedCount = 0;
 
-    for (let i = 0; i < frames.length; i++) {
-      const frame = frames[i];
-      const incident = await processOneFrame(frame);
+    // Use p-limit to maintain exactly 10 concurrent requests at all times
+    const limit = pLimit(MAX_CONCURRENT);
 
-      if (incident) {
-        incidents.push(incident);
-      }
+    const allResults = await Promise.all(
+      frames.map((frame, index) =>
+        limit(async () => {
+          const incident = await processOneFrame(frame);
+          processedCount++;
 
-      // Write progress update for each frame
-      const percent = 40 + Math.floor(((i + 1) / totalFrames) * 50);
-      await writeProgress(writable, {
-        type: "frameProcessed",
-        message: `Processing frame ${i + 1} of ${totalFrames}`,
-        current: i + 1,
-        total: totalFrames,
-        percent,
-      });
-    }
+          // Write progress update immediately after each frame completes
+          const percent = 40 + Math.floor((processedCount / totalFrames) * 50);
+          await writeProgress(writable, {
+            type: "frameProcessed",
+            message: `Processing frame ${processedCount} of ${totalFrames}`,
+            current: processedCount,
+            total: totalFrames,
+            percent,
+          });
+
+          return incident;
+        })
+      )
+    );
+
+    // Filter out null results to get only incidents
+    const incidents = allResults.filter((incident) => incident !== null);
 
     console.log(`Found ${incidents.length} incidents in video`);
 
@@ -89,6 +99,9 @@ export async function processVideoUpload(videoBuffer: Buffer, filename: string) 
       incidents,
       totalFrames: frames.length,
       processedAt: new Date().toISOString(),
+      metadata: {
+        filename: filename,
+      },
     };
 
     await writeProgress(writable, {
@@ -158,6 +171,8 @@ async function processOneFrame(frame: {
       confidence: moderationResult.confidence,
       categories: moderationResult.categories,
       screenshotUrl,
+      rating: moderationResult.rating,
+      analysis: moderationResult.analysis,
     };
   }
 
@@ -255,25 +270,81 @@ async function moderateFrame(frame: {
 }) {
   "use step";
 
-  // Mock moderation API - replace with actual moderation service
-  // For now, randomly flag ~20% of frames for demonstration
-  const isFlagged = Math.random() < 0.2;
+  try {
+    // Dynamic import to avoid workflow serialization issues
+    const { moderateContentSync } = await import("../ai/ocr/moderate-content");
 
-  if (isFlagged) {
+    // Use Gemini to analyze the frame
+    const result = await moderateContentSync(frame.buffer);
+
+    // Check if content is flagged (16+ or 18+)
+    const isFlagged = result.rating === "16+" || result.rating === "18+";
+
+    if (isFlagged) {
+      // Build categories array based on detected content
+      const categories: string[] = [];
+
+      // Check 16+ categories
+      if (result.analysis.sixteenPlus.cursing.detected) categories.push("cursing");
+      if (result.analysis.sixteenPlus.moderate_violence.detected) categories.push("moderate_violence");
+      if (result.analysis.sixteenPlus.strong_language.detected) categories.push("strong_language");
+      if (result.analysis.sixteenPlus.mild_sexual_content.detected) categories.push("mild_sexual");
+
+      // Check 18+ categories
+      if (result.analysis.eighteenPlus.nudity.detected) categories.push("nudity");
+      if (result.analysis.eighteenPlus.drug_use.detected) categories.push("drug_use");
+      if (result.analysis.eighteenPlus.rape.detected) categories.push("sexual_assault");
+      if (result.analysis.eighteenPlus.murder.detected) categories.push("murder");
+      if (result.analysis.eighteenPlus.stabbing.detected) categories.push("stabbing");
+      if (result.analysis.eighteenPlus.gore.detected) categories.push("gore");
+      if (result.analysis.eighteenPlus.extreme_profanity.detected) categories.push("extreme_profanity");
+      if (result.analysis.eighteenPlus.disturbing_themes.detected) categories.push("disturbing");
+
+      // Calculate average confidence across all detected categories
+      const confidenceSum = result.summary.highestConfidence;
+      const confidence = confidenceSum / 5; // Normalize to 0-1
+
+      return {
+        isFlagged: true,
+        confidence,
+        categories: categories.length > 0 ? categories.join(", ") : "flagged",
+        rating: result.rating,
+        analysis: result.analysis,
+      };
+    }
+
     return {
-      isFlagged: true,
-      confidence: Math.random() * 0.3 + 0.7, // 0.7-1.0
-      categories: ["adult", "violence", "gore"][
-        Math.floor(Math.random() * 3)
-      ],
+      isFlagged: false,
+      confidence: 0,
+      categories: null,
+      rating: "safe",
+    };
+  } catch (error) {
+    console.error("[MODERATION] Gemini API error:", error);
+
+    // Fallback to mock implementation if API fails
+    const isFlagged = Math.random() < 0.2;
+
+    if (isFlagged) {
+      return {
+        isFlagged: true,
+        confidence: Math.random() * 0.3 + 0.7,
+        categories: ["adult", "violence", "gore"][
+          Math.floor(Math.random() * 3)
+        ],
+        rating: "18+",
+        fallback: true,
+      };
+    }
+
+    return {
+      isFlagged: false,
+      confidence: 0,
+      categories: null,
+      rating: "safe",
+      fallback: true,
     };
   }
-
-  return {
-    isFlagged: false,
-    confidence: 0,
-    categories: null,
-  };
 }
 
 async function uploadScreenshotToBlob(buffer: Buffer, filename: string) {

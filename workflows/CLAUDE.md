@@ -72,7 +72,105 @@ export async function workflow() {
 }
 ```
 
-### 3. API Route Streaming
+### 3. No Nested Steps (CRITICAL)
+
+**Key Insight:** Steps CANNOT call other steps. This creates illegal nested step contexts that cause silent workflow hangs.
+
+**❌ NEVER do this (workflow will hang):**
+```typescript
+async function moderateFrame(frame: Buffer) {
+  "use step";  // ← Step 1
+
+  const result = await analyzeImage(frame);  // ← Calls another step!
+  return result;
+}
+
+async function analyzeImage(frame: Buffer) {
+  "use step";  // ← Step 2 - ILLEGAL NESTING!
+  // This will cause the workflow to freeze silently
+  return geminiAnalysis(frame);
+}
+
+export async function processOneFrame(frame: Buffer) {
+  "use step";  // ← Step 3
+
+  const result = await moderateFrame(frame);  // ← Nested steps!
+  await uploadScreenshot(result);  // ← Another nested step!
+  return result;
+}
+```
+
+**✅ ALWAYS do this:**
+```typescript
+// Option 1: Make helper functions regular (not steps)
+async function moderateFrame(frame: Buffer) {
+  // No "use step" - just a regular function
+  const result = await analyzeImage(frame);
+  return result;
+}
+
+async function analyzeImage(frame: Buffer) {
+  // No "use step" - just a regular function
+  return geminiAnalysis(frame);
+}
+
+export async function processOneFrame(frame: Buffer) {
+  "use step";  // Only the top-level function is a step
+
+  const result = await moderateFrame(frame);  // OK - regular function
+  await uploadScreenshot(result);  // OK if uploadScreenshot is also regular
+  return result;
+}
+
+// Option 2: Call steps directly from workflow
+export async function workflow() {
+  "use workflow";
+
+  for (const frame of frames) {
+    const analysis = await analyzeImage(frame);  // Step called from workflow
+    const screenshot = await uploadScreenshot(analysis);  // Step called from workflow
+  }
+}
+
+async function analyzeImage(frame: Buffer) {
+  "use step";  // OK - called directly from workflow
+  return geminiAnalysis(frame);
+}
+
+async function uploadScreenshot(data: any) {
+  "use step";  // OK - called directly from workflow
+  return upload(data);
+}
+```
+
+**Why This Happens:**
+- Vercel Workflows serialize step execution for durability
+- Nested steps break the serialization model
+- The workflow engine silently hangs (no error thrown)
+- Very difficult to debug without knowing this limitation
+
+**Common Mistakes:**
+
+1. **When refactoring code into steps**, it's tempting to have steps call other step functions. Instead:
+   - Only mark the top-level function as a step
+   - Or call each step directly from the workflow level
+   - Helper functions inside a step should NOT have "use step"
+
+2. **When moving functions to separate files**, make sure to check the entire call chain:
+   - If `functionA` (marked "use step") calls `functionB`, then `functionB` MUST NOT have "use step"
+   - This applies even when functions are in different files
+   - Example: `processOneFrame` (step) → calls `uploadScreenshotToBlob` → remove "use step" from `uploadScreenshotToBlob`
+
+**How to Audit for Nested Steps:**
+```bash
+# Find all "use step" functions
+grep -r "use step" workflows/
+
+# For each step function, check what it calls
+# If it calls another function with "use step", you have a violation
+```
+
+### 4. API Route Streaming
 
 **✅ Use `.readable` property:**
 ```typescript
@@ -91,7 +189,7 @@ export async function POST(request: Request) {
 }
 ```
 
-### 4. Error Handling
+### 5. Error Handling
 
 **Always:**
 - Send errors to the stream before throwing
@@ -125,7 +223,7 @@ export async function workflow() {
 }
 ```
 
-### 5. Retry Safety
+### 6. Retry Safety
 
 **Use `addRandomSuffix` for blob uploads:**
 ```typescript
@@ -236,6 +334,8 @@ When creating a new workflow with streaming:
 - [ ] Workflow gets `getWritable()`, never calls `.getWriter()`
 - [ ] Created `writeProgress` step function
 - [ ] Each progress update is a separate `await writeProgress()` call
+- [ ] **No nested steps** - steps do NOT call other step functions
+- [ ] Helper functions called from within steps do NOT have "use step"
 - [ ] API route uses `run.readable` (property, not method)
 - [ ] Added error handling with stream notification
 - [ ] Resources cleaned up in catch block

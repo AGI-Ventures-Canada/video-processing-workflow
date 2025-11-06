@@ -6,14 +6,30 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { AlertTriangleIcon, ClockIcon, CheckCircleIcon, XCircleIcon } from "lucide-react"
 import type { FlaggedVideo } from "./video-moderation-grid"
+import { updateVideoStatus, deleteVideo } from "@/lib/video-storage"
 
 interface VideoDetailModalProps {
   video: FlaggedVideo
   open: boolean
   onOpenChange: (open: boolean) => void
+  onVideoUpdated?: () => void
 }
 
-export function VideoDetailModal({ video, open, onOpenChange }: VideoDetailModalProps) {
+export function VideoDetailModal({ video, open, onOpenChange, onVideoUpdated }: VideoDetailModalProps) {
+  const handleApprove = () => {
+    updateVideoStatus(video.id, "approved")
+    onVideoUpdated?.()
+    onOpenChange(false)
+  }
+
+  const handleRemove = () => {
+    if (confirm("Are you sure you want to remove this video?")) {
+      deleteVideo(video.id)
+      onVideoUpdated?.()
+      onOpenChange(false)
+    }
+  }
+
   const getSeverityColor = (severity: string) => {
     switch (severity) {
       case "high":
@@ -45,6 +61,21 @@ export function VideoDetailModal({ video, open, onOpenChange }: VideoDetailModal
                 <span>
                   {video.flagCount} flag{video.flagCount !== 1 ? "s" : ""}
                 </span>
+                {video.overallRating && video.overallRating !== "safe" && (
+                  <>
+                    <span>•</span>
+                    <Badge
+                      variant="outline"
+                      className={
+                        video.overallRating === "18+"
+                          ? "bg-red-500/10 text-red-500 border-red-500/20"
+                          : "bg-amber-500/10 text-amber-500 border-amber-500/20"
+                      }
+                    >
+                      {video.overallRating}
+                    </Badge>
+                  </>
+                )}
               </div>
             </div>
             <Badge variant="outline" className={getSeverityColor(video.severity)}>
@@ -85,9 +116,52 @@ export function VideoDetailModal({ video, open, onOpenChange }: VideoDetailModal
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-start justify-between gap-2 mb-2">
-                        <div>
-                          <div className="text-sm font-medium text-foreground mb-1">{frame.reason}</div>
-                          <div className="text-xs text-muted-foreground">Timestamp: {frame.timestamp}</div>
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 mb-1">
+                            <div className="text-sm font-medium text-foreground">{frame.reason}</div>
+                            {frame.rating && (
+                              <Badge
+                                variant="outline"
+                                className={
+                                  frame.rating === "18+"
+                                    ? "bg-red-500/10 text-red-500 border-red-500/20"
+                                    : "bg-amber-500/10 text-amber-500 border-amber-500/20"
+                                }
+                              >
+                                {frame.rating}
+                              </Badge>
+                            )}
+                          </div>
+                          <div className="text-xs text-muted-foreground mb-2">Timestamp: {frame.timestamp}</div>
+                          {frame.categories && (
+                            <div className="flex flex-wrap gap-1.5 mt-2">
+                              {frame.categories.split(", ").map((category, idx) => (
+                                <Badge
+                                  key={idx}
+                                  variant="secondary"
+                                  className="text-xs bg-muted text-muted-foreground border-border"
+                                >
+                                  {category}
+                                </Badge>
+                              ))}
+                            </div>
+                          )}
+                          {frame.categoryReasons && frame.categoryReasons.length > 0 && (
+                            <div className="mt-3 space-y-2">
+                              <div className="text-xs font-semibold text-foreground">Category Details:</div>
+                              {frame.categoryReasons.map((catReason, idx) => (
+                                <div key={idx} className="pl-3 border-l-2 border-border">
+                                  <div className="flex items-center gap-2 mb-1">
+                                    <span className="text-xs font-medium text-foreground">{catReason.category}</span>
+                                    <Badge variant="outline" className="text-xs">
+                                      {Math.round((catReason.confidence / 5) * 100)}%
+                                    </Badge>
+                                  </div>
+                                  <p className="text-xs text-muted-foreground">{catReason.reason}</p>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
                         <Badge
                           variant="outline"
@@ -109,11 +183,15 @@ export function VideoDetailModal({ video, open, onOpenChange }: VideoDetailModal
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Close
           </Button>
-          <Button variant="outline" className="text-red-500 hover:text-red-600 bg-transparent">
+          <Button
+            variant="outline"
+            className="text-red-500 hover:text-red-600 bg-transparent"
+            onClick={handleRemove}
+          >
             <XCircleIcon className="size-4 mr-2" />
             Remove Video
           </Button>
-          <Button>
+          <Button onClick={handleApprove}>
             <CheckCircleIcon className="size-4 mr-2" />
             Approve Video
           </Button>

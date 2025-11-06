@@ -5,7 +5,11 @@ import { UploadIcon } from "lucide-react";
 import { UploadVideoDialog } from "./upload-video-dialog";
 import { useState } from "react";
 
-export function Topbar() {
+interface TopbarProps {
+  onVideoSaved?: () => void;
+}
+
+export function Topbar({ onVideoSaved }: TopbarProps) {
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
 
   return (
@@ -31,6 +35,7 @@ export function Topbar() {
       <UploadVideoDialog
         open={uploadDialogOpen}
         onOpenChange={setUploadDialogOpen}
+        onVideoSaved={onVideoSaved}
       />
     </>
   );
